@@ -90,4 +90,20 @@ describe('PartitionKeyGenerators', () => {
 
         throw new Error('should have thrown an error!');
     });
+
+
+    it('should be able to generate the persistenceId from requestEnvelope using user locale', () => {
+        const requestEnvelope = JsonProvider.requestEnvelope();
+        requestEnvelope.request.locale = 'userLocale';
+
+        expect(PartitionKeyGenerators.userLocale(requestEnvelope)).equal('userLocale');
+    });
+
+    it('should be able to generate the persistenceId from requestEnvelope using user id if user locale is missing', () => {
+        const requestEnvelope = JsonProvider.requestEnvelope();
+        requestEnvelope.context.System.user.userId = 'userId';
+
+        expect(PartitionKeyGenerators.userLocale(requestEnvelope)).equal('userId');
+    });
+
 });

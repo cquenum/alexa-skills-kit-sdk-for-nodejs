@@ -41,7 +41,13 @@ export const JsonProvider = {
                     },
                 },
             },
-            request: null,
+            request: {
+                type: null,
+                requestId: null,
+                timestamp: null,
+                token: null,
+                locale: null
+            },
             session: {
                 application: {
                     applicationId: null,

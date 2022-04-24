@@ -16,45 +16,44 @@ import {
     PersistenceAdapter
 } from 'ask-sdk-core';
 import { RequestEnvelope } from 'ask-sdk-model';
-import { DynamoDB } from 'aws-sdk';
+import { CreateTableCommand, CreateTableInput, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DeleteCommand, DeleteCommandInput, DynamoDBDocumentClient, GetCommand, GetCommandInput, GetCommandOutput, PutCommand, PutCommandInput } from '@aws-sdk/lib-dynamodb';
 import {
     PartitionKeyGenerator,
     PartitionKeyGenerators
 } from './PartitionKeyGenerators';
 
-/**
- * Implementation of {@link PersistenceAdapter} using AWS DynamoDB.
- */
 export class DynamoDbPersistenceAdapter implements PersistenceAdapter {
     protected tableName: string;
     protected partitionKeyName: string;
     protected attributesName: string;
     protected createTable: boolean;
-    protected dynamoDBClient: DynamoDB;
+    protected dynamoDBClient: DynamoDBClient;
     protected partitionKeyGenerator: PartitionKeyGenerator;
-    protected dynamoDBDocumentClient: DynamoDB.DocumentClient;
+    protected dynamoDBDocumentClient: DynamoDBDocumentClient;
 
     constructor(config: {
         tableName: string,
-        partitionKeyName? : string,
-        attributesName? : string,
-        createTable? : boolean,
-        dynamoDBClient? : DynamoDB,
-        partitionKeyGenerator? : PartitionKeyGenerator;
+        partitionKeyName?: string,
+        attributesName?: string,
+        createTable?: boolean,
+        dynamoDBClient?: DynamoDBClient,
+        partitionKeyGenerator?: PartitionKeyGenerator;
     }) {
         this.tableName = config.tableName;
         this.partitionKeyName = config.partitionKeyName ? config.partitionKeyName : 'id';
         this.attributesName = config.attributesName ? config.attributesName : 'attributes';
         this.createTable = config.createTable === true;
-        this.dynamoDBClient = config.dynamoDBClient ? config.dynamoDBClient : new DynamoDB({apiVersion : 'latest'});
+        this.dynamoDBClient = config.dynamoDBClient ? config.dynamoDBClient : new DynamoDBClient({ apiVersion: 'latest' });
         this.partitionKeyGenerator = config.partitionKeyGenerator ? config.partitionKeyGenerator : PartitionKeyGenerators.userId;
-        this.dynamoDBDocumentClient = new DynamoDB.DocumentClient({
-            convertEmptyValues : true,
-            service : this.dynamoDBClient,
+        this.dynamoDBDocumentClient = DynamoDBDocumentClient.from(this.dynamoDBClient, {
+            marshallOptions: { convertEmptyValues: true },
+            unmarshallOptions: { wrapNumbers: false },
         });
-        // Create table when createTable is set to true and table does not exist
+
         if (this.createTable) {
-            const createTableParams: DynamoDB.CreateTableInput = {
+            const createTableParams: CreateTableInput = {
+                TableName: this.tableName,
                 AttributeDefinitions: [{
                     AttributeName: this.partitionKeyName,
                     AttributeType: 'S',
@@ -66,18 +65,18 @@ export class DynamoDbPersistenceAdapter implements PersistenceAdapter {
                 ProvisionedThroughput: {
                     ReadCapacityUnits: 5,
                     WriteCapacityUnits: 5,
-                },
-                TableName : this.tableName,
+                }
             };
 
-            this.dynamoDBClient.createTable(createTableParams, (createTableErr) => {
-                if (createTableErr && createTableErr.code !== 'ResourceInUseException') {
-                    throw createAskSdkError(
-                        this.constructor.name,
-                        `Could not create table (${this.tableName}): ${createTableErr.message}`,
-                    );
-                }
-            });
+            this.dynamoDBClient.send(new CreateTableCommand(createTableParams))
+                .catch(error => {
+                    if (error.code !== 'ResourceInUseException') {
+                        throw createAskSdkError(
+                            this.constructor.name,
+                            `Could not create table (${this.tableName}): ${error.message}`,
+                        );
+                    }
+                });
         }
     }
 
@@ -86,32 +85,33 @@ export class DynamoDbPersistenceAdapter implements PersistenceAdapter {
      * @param {RequestEnvelope} requestEnvelope Request envelope used to generate partition key.
      * @returns {Promise<Object.<string, any>>}
      */
-    public async getAttributes(requestEnvelope: RequestEnvelope): Promise<{[key: string]: any}> {
+    public async getAttributes(requestEnvelope: RequestEnvelope): Promise<{ [key: string]: any; }> {
         const attributesId = this.partitionKeyGenerator(requestEnvelope);
 
-        const getParams: DynamoDB.DocumentClient.GetItemInput = {
-            Key : {
-                [this.partitionKeyName] : attributesId,
+        const getParams: GetCommandInput = {
+            Key: {
+                [this.partitionKeyName]: attributesId
             },
-            TableName : this.tableName,
-            ConsistentRead : true,
+            TableName: this.tableName,
+            ConsistentRead: true,
         };
 
-        let data: DynamoDB.DocumentClient.GetItemOutput;
+        let data: GetCommandOutput;
         try {
-            data = await this.dynamoDBDocumentClient.get(getParams).promise();
-        } catch (err) {
+            data = await this.dynamoDBDocumentClient.send(new GetCommand(getParams));
+        } catch (error) {
             throw createAskSdkError(
                 this.constructor.name,
-                `Could not read item (${attributesId}) from table (${getParams.TableName}): ${err.message}`,
+                `Could not read item (${attributesId}) from table (${getParams.TableName}): ${error.message}`,
             );
         }
 
-        if (!Object.keys(data).length) {
-            return {};
-        } else {
-            return data.Item[this.attributesName];
+        if (data && data.Item) {
+            const result = data.Item[this.attributesName] || {};
+            return result;
         }
+
+        return {};
     }
 
     /**
@@ -120,19 +120,19 @@ export class DynamoDbPersistenceAdapter implements PersistenceAdapter {
      * @param {Object.<string, any>} attributes Attributes to be saved to DynamoDB.
      * @return {Promise<void>}
      */
-    public async saveAttributes(requestEnvelope: RequestEnvelope, attributes: {[key: string]: any}): Promise<void> {
+    public async saveAttributes(requestEnvelope: RequestEnvelope, attributes: { [key: string]: any; }): Promise<void> {
         const attributesId = this.partitionKeyGenerator(requestEnvelope);
 
-        const putParams: DynamoDB.DocumentClient.PutItemInput = {
+        const putParams: PutCommandInput = {
             Item: {
-                [this.partitionKeyName] : attributesId,
-                [this.attributesName] : attributes,
+                [this.partitionKeyName]: attributesId,
+                [this.attributesName]: attributes,
             },
-            TableName : this.tableName,
+            TableName: this.tableName,
         };
 
         try {
-            await this.dynamoDBDocumentClient.put(putParams).promise();
+            await this.dynamoDBDocumentClient.send(new PutCommand(putParams));
         } catch (err) {
             throw createAskSdkError(
                 this.constructor.name,
@@ -149,19 +149,19 @@ export class DynamoDbPersistenceAdapter implements PersistenceAdapter {
     public async deleteAttributes(requestEnvelope: RequestEnvelope): Promise<void> {
         const attributesId = this.partitionKeyGenerator(requestEnvelope);
 
-        const deleteParams: DynamoDB.DocumentClient.DeleteItemInput = {
-            Key : {
-                [this.partitionKeyName] : attributesId,
+        const deleteParams: DeleteCommandInput = {
+            Key: {
+                [this.partitionKeyName]: attributesId,
             },
-            TableName : this.tableName,
+            TableName: this.tableName,
         };
 
         try {
-            await this.dynamoDBDocumentClient.delete(deleteParams).promise();
-        } catch (err) {
+            await this.dynamoDBDocumentClient.send(new DeleteCommand(deleteParams));
+        } catch (error) {
             throw createAskSdkError(
                 this.constructor.name,
-                `Could not delete item (${attributesId}) from table (${deleteParams.TableName}): ${err.message}`,
+                `Could not delete item (${attributesId}) from table (${deleteParams.TableName}): ${error.message}`,
             );
         }
     }

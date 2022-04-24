@@ -11,12 +11,17 @@
  * permissions and limitations under the License.
  */
 
-import * as AWS from 'aws-sdk';
-import * as AWS_MOCK from 'aws-sdk-mock';
+import { CreateTableCommand, DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
+
 import { expect } from 'chai';
 import { DynamoDbPersistenceAdapter } from '../../../lib/attributes/persistence/DynamoDbPersistenceAdapter';
 import { PartitionKeyGenerators } from '../../../lib/attributes/persistence/PartitionKeyGenerators';
 import { JsonProvider } from '../../mocks/JsonProvider';
+
+const dynamodb = new DynamoDBClient({ apiVersion: 'latest' });
+const ddbMock = mockClient(DynamoDBDocumentClient);
 
 describe('DynamoDbPersistenceAdapter', () => {
     const tableName = 'mockTableName';
@@ -24,33 +29,37 @@ describe('DynamoDbPersistenceAdapter', () => {
     const defaultPartitionKey = 'userId';
     const defaultAttributesName = 'attributes';
     const defaultAttributes = {
-        defaultKey : 'defaultValue',
+        defaultKey: 'defaultValue',
     };
-    const defaultGetItemOutput = {
-        [defaultPartitionKeyName] : defaultPartitionKey,
-        [defaultAttributesName] : defaultAttributes,
+    const defaultGetCommandOutput = {
+        Item: {
+            [defaultPartitionKeyName]: defaultPartitionKey,
+            [defaultAttributesName]: defaultAttributes,
+        }
     };
 
     const customPartitionKeyName = 'mockId';
     const customPartitionKey = 'deviceId';
     const customAttributesName = 'mockAttributes';
     const customAttributes = {
-        customKey : 'customValue',
+        customKey: 'customValue',
     };
-    const customGetItemOutput = {
-        [customPartitionKeyName] : customPartitionKey,
-        [customAttributesName] : customAttributes,
+    const customGetCommandOutput = {
+        Item: {
+            [customPartitionKeyName]: customPartitionKey,
+            [customAttributesName]: customAttributes,
+        }
     };
 
     const resourceNotFoundError = new Error('Requested resource not found');
     Object.defineProperty(resourceNotFoundError, 'code', {
-        value : 'ResourceNotFoundException',
+        value: 'ResourceNotFoundException',
         writable: false,
     });
 
     const resourceInUseError = new Error('Requested resource in use');
     Object.defineProperty(resourceInUseError, 'code', {
-        value : 'ResourceInUseException',
+        value: 'ResourceInUseException',
         writable: false,
     });
 
@@ -59,53 +68,12 @@ describe('DynamoDbPersistenceAdapter', () => {
     requestEnvelope.context.System.user.userId = 'userId';
 
     before((done) => {
-        AWS_MOCK.setSDKInstance(AWS);
-        AWS_MOCK.mock('DynamoDB.DocumentClient', 'get', (params, callback) => {
-            if (params.TableName !== tableName) {
-                // table name not valid
-                callback(resourceNotFoundError, null);
-            } else {
-                if (params.Key[defaultPartitionKeyName] === defaultPartitionKey) {
-                    callback(null, {Item: defaultGetItemOutput });
-                } else if (params.Key[customPartitionKeyName] === customPartitionKey) {
-                    callback(null, {Item: customGetItemOutput });
-                } else {
-                    // item not found
-                    callback(null, {});
-                }
-            }
-        });
-        AWS_MOCK.mock('DynamoDB.DocumentClient', 'put', (params, callback) => {
-            if (params.TableName !== tableName) {
-                // table name not valid
-                callback(resourceNotFoundError, null);
-            } else {
-                callback(null, {});
-            }
-        });
-        AWS_MOCK.mock('DynamoDB.DocumentClient', 'delete', (params, callback) => {
-            if (params.TableName !== tableName) {
-                // table name not valid
-                callback(resourceNotFoundError, null);
-            } else {
-                callback(null, {});
-            }
-        });
-        AWS_MOCK.mock('DynamoDB', 'createTable', (params, callback) => {
-            if (params.TableName === tableName) {
-                callback(resourceInUseError, null);
-            }
-            if (params.TableName === 'CreateNewErrorTable') {
-                callback(new Error('Unable to create table'), null);
-            } else {
-                callback(null, {});
-            }
-        });
+        ddbMock.reset();
         done();
     });
 
     after((done) => {
-        AWS_MOCK.restore('DynamoDB.DocumentClient');
+        ddbMock.restore();
         done();
     });
 
@@ -115,27 +83,30 @@ describe('DynamoDbPersistenceAdapter', () => {
         });
         const customPersistenceAdapter = new DynamoDbPersistenceAdapter({
             tableName,
-            partitionKeyName : customPartitionKeyName,
-            attributesName : customAttributesName,
-            dynamoDBClient : new AWS.DynamoDB(),
-            partitionKeyGenerator : PartitionKeyGenerators.deviceId,
+            partitionKeyName: customPartitionKeyName,
+            attributesName: customAttributesName,
+            dynamoDBClient: dynamodb,
+            partitionKeyGenerator: PartitionKeyGenerators.deviceId,
         });
 
+        ddbMock.on(GetCommand).resolves(defaultGetCommandOutput);
+
         const defaultResult = await defaultPersistenceAdapter.getAttributes(requestEnvelope);
-        expect(defaultResult[defaultPartitionKeyName]).equal(undefined);
-        expect(defaultResult.defaultKey).equal('defaultValue');
+        expect(defaultResult[defaultPartitionKey]).equal(undefined);
+        expect(defaultResult['defaultKey']).equal('defaultValue');
+
+        ddbMock.on(GetCommand).resolves(customGetCommandOutput);
 
         const customResult = await customPersistenceAdapter.getAttributes(requestEnvelope);
         expect(customResult[customPartitionKeyName]).equal(undefined);
-        expect(customResult.customKey).equal('customValue');
-
+        expect(customResult['customKey']).equal('customValue');
     });
 
     it('should be able to put an item to table', async () => {
         const persistenceAdapter = new DynamoDbPersistenceAdapter({
             tableName,
         });
-
+        ddbMock.on(PutCommand).resolves({});
         await persistenceAdapter.saveAttributes(requestEnvelope, {});
     });
 
@@ -143,8 +114,8 @@ describe('DynamoDbPersistenceAdapter', () => {
         const persistenceAdapter = new DynamoDbPersistenceAdapter({
             tableName,
         });
-
-        await persistenceAdapter.saveAttributes(requestEnvelope, {});
+        ddbMock.on(DeleteCommand).resolves({});
+        await persistenceAdapter.deleteAttributes(requestEnvelope);
     });
 
     it('should return an empty object when getting item that does not exist in table', async () => {
@@ -155,21 +126,25 @@ describe('DynamoDbPersistenceAdapter', () => {
         const mockRequestEnvelope = JsonProvider.requestEnvelope();
         mockRequestEnvelope.context.System.user.userId = 'NonExistentKey';
 
+        ddbMock.on(GetCommand).resolves({ Item: {} });
+
         const result = await persistenceAdapter.getAttributes(mockRequestEnvelope);
         expect(result).deep.equal({});
     });
 
     it('should throw an error when saving and the table does not exist', async () => {
         const persistenceAdapter = new DynamoDbPersistenceAdapter({
-            tableName : 'NonExistentTable',
+            tableName: 'NonExistentTable',
         });
+
+        ddbMock.on(PutCommand).rejects('Requested resource not found');
 
         try {
             await persistenceAdapter.saveAttributes(requestEnvelope, {});
         } catch (err) {
             expect(err.name).equal('AskSdk.DynamoDbPersistenceAdapter Error');
             expect(err.message).equal('Could not save item (userId) to table (NonExistentTable): '
-                                      + 'Requested resource not found');
+                + 'Requested resource not found');
 
             return;
         }
@@ -178,15 +153,17 @@ describe('DynamoDbPersistenceAdapter', () => {
 
     it('should throw an error when deleting and the table does not exist', async () => {
         const persistenceAdapter = new DynamoDbPersistenceAdapter({
-            tableName : 'NonExistentTable',
+            tableName: 'NonExistentTable',
         });
+
+        ddbMock.on(DeleteCommand).rejects('Requested resource not found');
 
         try {
             await persistenceAdapter.deleteAttributes(requestEnvelope);
         } catch (err) {
             expect(err.name).equal('AskSdk.DynamoDbPersistenceAdapter Error');
             expect(err.message).equal('Could not delete item (userId) from table (NonExistentTable): '
-                                      + 'Requested resource not found');
+                + 'Requested resource not found');
 
             return;
         }
@@ -195,20 +172,24 @@ describe('DynamoDbPersistenceAdapter', () => {
 
     describe('with AutoCreateTable', () => {
         it('should throw an error when create table returns error other than ResourceInUseException', () => {
+            ddbMock.on(CreateTableCommand).rejects();
+
             try {
                 const persistenceAdapter = new DynamoDbPersistenceAdapter({
-                    tableName : 'CreateNewErrorTable',
-                    createTable : true,
+                    tableName: 'CreateNewErrorTable',
+                    createTable: true,
                 });
             } catch (err) {
                 expect(err.name).eq('AskSdk.DynamoDbPersistenceAdapter Error');
                 expect(err.message).eq('Could not create table (CreateNewErrorTable): Unable to create table');
             }
         });
+
         it('should not throw any error if the table already exists', () => {
+            ddbMock.on(CreateTableCommand).resolves({});
             const persistenceAdapter = new DynamoDbPersistenceAdapter({
                 tableName,
-                createTable : true,
+                createTable: true,
             });
         });
     });
@@ -216,16 +197,18 @@ describe('DynamoDbPersistenceAdapter', () => {
     describe('without AutoCreateTable', () => {
         it('should throw an error when reading and the table does not exist', async () => {
             const persistenceAdapter = new DynamoDbPersistenceAdapter({
-                tableName : 'NonExistentTable',
-                createTable : false,
+                tableName: 'NonExistentTable',
+                createTable: false,
             });
 
+            ddbMock.on(GetCommand).rejects('Requested resource not found');
+
             try {
-                await persistenceAdapter.getAttributes(requestEnvelope);
+                const data = await persistenceAdapter.getAttributes(requestEnvelope);
             } catch (err) {
                 expect(err.name).equal('AskSdk.DynamoDbPersistenceAdapter Error');
-                expect(err.message).equal('Could not read item (userId) from table (NonExistentTable): ' +
-                                          'Requested resource not found');
+                expect(err.message).equal('Could not read item (userId) from table (NonExistentTable): '
+                    + 'Requested resource not found');
 
                 return;
             }

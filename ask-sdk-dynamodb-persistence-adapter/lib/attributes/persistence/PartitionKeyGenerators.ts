@@ -80,4 +80,13 @@ export const PartitionKeyGenerators = {
 
         return PartitionKeyGenerators.userId(requestEnvelope);
     },
+
+    userLocale(requestEnvelope: RequestEnvelope): string {
+        if (requestEnvelope
+            && requestEnvelope.request
+            && requestEnvelope.request.locale) {
+            return requestEnvelope.request.locale;
+        }
+        return exports.PartitionKeyGenerators.userId(requestEnvelope);
+    }
 };
